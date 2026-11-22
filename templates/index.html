@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="{{ form.language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Winter Smog Assistant</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-content">
+            <h1>Winter Smog Household Assistant</h1>
+            <p>Estimate your indoor air quality and get low-emission routines for your family.</p>
+        </div>
+    </header>
+
+    <main class="container">
+        {% if error %}
+        <div role="alert" class="error-alert">{{ error }}</div>
+        {% endif %}
+
+        <div class="layout-grid">
+            <!-- LEFT COLUMN: Input Form -->
+            <section class="form-section">
+                <form method="POST" action="/" aria-label="Household air quality form">
+                    <div class="card">
+                        <div class="card-header">Location & Home</div>
+                        <div class="card-body">
+                            <div class="form-group">
+                                <label for="city">City</label>
+                                <select id="city" name="city" class="form-control">
+                                    {% for c in cities %}
+                                    <option value="{{ c }}" {% if form.city == c %}selected{% endif %}>{{ c }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            
+                            <div class="input-row">
+                                <div class="form-group">
+                                    <label for="area_m2">Room area (m²)</label>
+                                    <input type="number" id="area_m2" name="area_m2" min="5" max="500" step="1" value="{{ form.area_m2 }}" required class="form-control">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ceiling_height_m">Ceiling height (m)</label>
+                                    <input type="number" id="ceiling_height_m" name="ceiling_height_m" min="2" max="5" step="0.1" value="{{ form.ceiling_height_m }}" required class="form-control">
+                                </div>
+                            </div>
+
+                            <div class="checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" name="windows_open" value="1" {% if form.windows_open %}checked{% endif %}>
+                                    <span>Windows currently open</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" name="purifier_running" value="1" {% if form.purifier_running %}checked{% endif %}>
+                                    <span>Air purifier running</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">Family Profile</div>
+                        <div class="card-body">
+                            <div class="checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" name="has_child" value="1" {% if form.has_child %}checked{% endif %}>
+                                    <span>A child lives here</span>
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" name="has_asthma" value="1" {% if form.has_asthma %}checked{% endif %}>
+                                    <span>Someone has asthma</span>
+                                </label>
+                            </div>
+
+                            <div class="input-row" style="margin-top: 1rem;">
+                                <div class="form-group">
+                                    <label for="hours_outdoors">Hours outdoors / day</label>
+                                    <input type="number" id="hours_outdoors" name="hours_outdoors" min="0" max="24" step="0.5" value="{{ form.hours_outdoors }}" class="form-control">
+                                </div>
+                                <div class="form-group">
+                                    <label for="language">Language</label>
+                                    <select id="language" name="language" class="form-control">
+                                        {% for lang in languages %}
+                                        <option value="{{ lang }}" {% if form.language == lang %}selected{% endif %}>{{ lang }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="submit-btn">Calculate Air Quality</button>
+                </form>
+            </section>
+
+            <!-- RIGHT COLUMN: Results -->
+                            <section class="results-section">
+                {% if response %}
+                <div class="card result-card">
+                    <div class="card-header">Today's Air Quality</div>
+                    <div class="card-body">
+                        <div class="stat-grid">
+                                                       <div class="stat-box">
+                                <span class="stat-label">Outdoor PM2.5</span>
+                                <span class="stat-value">{{ response.outdoor_pm25_ug_m3 }} <small>µg/m³</small></span>
+                                <span class="stat-badge badge-{{ response.outdoor_aqi_band|lower|replace(' ', '-') }}">
+                                    {{ response.outdoor_aqi_band }}
+                                </span>
+                                <span class="stat-source">Data: {{ response.data_source|capitalize }}</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-label">Indoor PM2.5</span>
+                                <span class="stat-value">{{ response.indoor_pm25_ug_m3 }} <small>µg/m³</small></span>
+                                <span class="stat-source">{{ response.indoor_explanation }}</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-label">Daily Inhaled</span>
+                                <span class="stat-value">{{ response.daily_exposure_ug }} <small>µg</small></span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-label">Required CADR</span>
+                                <span class="stat-value">{{ response.recommended_cadr_m3_per_hour }} <small>m³/h</small></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card result-card" style="margin-top: 1.5rem;">
+                    <div class="card-header">Recommended Actions</div>
+                    <div class="card-body p-0">
+                        <ul class="action-list">
+                            {% for rec in response.recommendations %}
+                            <li class="action-item">
+                                <div class="action-icon">💡</div>
+                                <div class="action-content">
+                                    <h3>{{ rec.title }}</h3>
+                                    <p class="action-impact">{{ rec.impact_summary }}</p>
+                                    <p class="action-why"><em>Why: {{ rec.explanation }}</em></p>
+                                </div>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">🍃</div>
+                    <h2>Ready to check your air?</h2>
+                    <p>Fill out the form on the left and click Calculate to see your personalized indoor air quality report and recommendations.</p>
+                </div>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+
+    <footer class="app-footer">
+        <p>Data: CPCB via OpenAQ. Exposure model: US EPA Exposure Factors Handbook. Purifier sizing: AHAM AC-1.</p>
+    </footer>
+</body>
+</html>
