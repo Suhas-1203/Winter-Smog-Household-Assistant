@@ -81,3 +81,8 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=os.environ.get("FLASK_ENV") == "development", port=5000)
+
+@app.errorhandler(500)
+def internal_error(error):
+    import traceback
+    return f"<pre>{traceback.format_exc()}</pre>", 500    
