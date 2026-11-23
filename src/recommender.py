@@ -1,27 +1,11 @@
-"""Rule engine that assembles the assistant's response.
-
-This module is the orchestrator. It:
-  1. Fetches outdoor PM2.5 via air_quality_api.
-  2. Computes indoor PM2.5 and exposure via exposure_model.
-  3. Computes CADR needs via cadr_calculator.
-  4. Builds a candidate list of recommendations, each with pre-computed
-     impact numbers (computed HERE, not by the LLM).
-  5. Optionally asks Gemini to pick which recommendations to show and
-     write one short explanation sentence per recommendation.
-  6. Passes Gemini's output through gemini_filter, which rejects any
-     response containing a digit and replaces it with a digit-free
-     template.
-
-Design rule (Security criterion):
-    Gemini never produces a number. Every digit in the final response is
-    computed by code in this module or in exposure_model / cadr_calculator.
-    The filter is the last line of defence.
-"""
+"""Rule engine that assembles the assistant's response."""
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
 from .air_quality_api import AirQualityReading, get_outdoor_air_quality
 from .cadr_calculator import required_cadr
@@ -31,15 +15,12 @@ from .exposure_model import (
     indoor_pm25,
 )
 from .gemini_filter import sanitise_gemini_output, template_for_recommendation
+from .config import GEMINI_MAX_OUTPUT_TOKENS, GEMINI_TIMEOUT_SECONDS
 
 
 @dataclass
 class FamilyProfile:
-    """Minimal non-identifying profile supplied by the user.
-
-    We intentionally keep this small: no name, no address, no phone.
-    Only aggregate facts needed to size the recommendations.
-    """
+    """Minimal non-identifying profile supplied by the user."""
 
     area_m2: float = 30.0
     ceiling_height_m: float = 2.7
@@ -57,8 +38,8 @@ class Recommendation:
 
     id: str
     title: str
-    impact_summary: str  # built from deterministic numbers only
-    explanation: str     # may come from Gemini or fallback template
+    impact_summary: str
+    explanation: str
 
 
 @dataclass
@@ -77,17 +58,10 @@ class AssistantResponse:
     filter_events: int = 0
 
 
-def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> list[dict]:
-    """Build the candidate recommendation list with impact numbers pre-computed.
+def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> list[dict[str, str]]:
+    """Build the candidate recommendation list with impact numbers pre-computed."""
+    candidates: list[dict[str, str]] = []
 
-    Each candidate has:
-      - id: stable string, matched by templates in gemini_filter
-      - title: short human-readable heading
-      - impact_summary: a sentence built from deterministic numbers only
-    """
-    candidates: list[dict] = []
-
-    # 1. Window management
     if outdoor.pm25_ug_m3 > 150 and profile.windows_open:
         candidates.append({
             "id": "close_windows",
@@ -98,7 +72,6 @@ def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> lis
             ),
         })
 
-    # 2. Purifier sizing
     cadr = required_cadr(profile.area_m2, profile.ceiling_height_m)
     if not profile.purifier_running and outdoor.pm25_ug_m3 > 100:
         candidates.append({
@@ -110,10 +83,7 @@ def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> lis
             ),
         })
 
-    # 3. Shift outdoor activity
     if profile.hours_outdoors > 0 and outdoor.pm25_ug_m3 > 150:
-        # Assume late-afternoon window is cleaner by 30% — a conservative
-        # figure documented in the SaafSaans submission for Indian cities.
         cleaner = round(outdoor.pm25_ug_m3 * 0.70, 1)
         before = daily_exposure_ug(outdoor.pm25_ug_m3, 0.0, profile.hours_outdoors, profile.has_child)
         after = daily_exposure_ug(cleaner, 0.0, profile.hours_outdoors, profile.has_child)
@@ -127,7 +97,6 @@ def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> lis
             ),
         })
 
-    # 4. Cooking ventilation
     if outdoor.pm25_ug_m3 > 100:
         candidates.append({
             "id": "cooking_ventilation",
@@ -138,7 +107,6 @@ def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> lis
             ),
         })
 
-    # 5. Avoid incense / mosquito coils
     candidates.append({
         "id": "avoid_incense",
         "title": "Avoid incense and mosquito coils indoors",
@@ -151,25 +119,17 @@ def _build_candidates(profile: FamilyProfile, outdoor: AirQualityReading) -> lis
     return candidates
 
 
-def _gemini_explain(candidates: list[dict], profile: FamilyProfile, outdoor: AirQualityReading) -> dict[str, str]:
-    """Ask Gemini for one short explanation per candidate.
-
-    Returns a dict of {candidate_id: explanation_text}. If the Gemini
-    client is unavailable (no API key, network error), returns an empty
-    dict and the caller falls back to templates. Every returned string
-    has already been passed through the digit filter.
-    """
+def _gemini_explain(candidates: list[dict[str, str]], profile: FamilyProfile, outdoor: AirQualityReading) -> dict[str, str]:
+    """Ask Gemini for one short explanation per candidate."""
     try:
         import google.generativeai as genai  # type: ignore
     except ImportError:
         return {}
 
-    import os
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return {}
 
-    from .config import GEMINI_MAX_OUTPUT_TOKENS, GEMINI_TIMEOUT_SECONDS
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-1.5-flash")
 
@@ -194,10 +154,10 @@ def _gemini_explain(candidates: list[dict], profile: FamilyProfile, outdoor: Air
             },
         )
         raw = getattr(response, "text", "") or ""
-    except Exception:
+    except Exception as exc:
+        logging.warning("Gemini API failed, falling back to templates: %s", exc)
         return {}
 
-    # Split response into lines; each line starts with a candidate id.
     explanations: dict[str, str] = {}
     for line in raw.splitlines():
         for candidate in candidates:
@@ -216,19 +176,7 @@ def build_response(
     profile: FamilyProfile,
     use_gemini: bool = True,
 ) -> AssistantResponse:
-    """Assemble the full assistant response for a user request.
-
-    Args:
-        location_id: OpenAQ location id for the user's city.
-        location_name: Human-readable city name for display.
-        profile: FamilyProfile describing the household.
-        use_gemini: If False, skip the Gemini call entirely (useful for
-            deterministic tests). Every number is identical either way.
-
-    Returns:
-        AssistantResponse with all numbers computed deterministically and
-        explanations either from Gemini (digit-filtered) or from templates.
-    """
+    """Assemble the full assistant response for a user request."""
     outdoor = get_outdoor_air_quality(location_id, location_name)
 
     room = RoomConditions(
@@ -255,15 +203,13 @@ def build_response(
         gemini_explanations = _gemini_explain(candidates, profile, outdoor)
 
     recommendations: list[Recommendation] = []
-    filter_events = 0
     for candidate in candidates:
         cid = candidate["id"]
         if cid in gemini_explanations:
             explanation = gemini_explanations[cid]
         else:
             explanation = template_for_recommendation(cid, profile.language)
-            # Count a filter event if the candidate had Gemini text that
-            # was rejected (already handled in _gemini_explain).
+            
         recommendations.append(Recommendation(
             id=cid,
             title=candidate["title"],
@@ -281,5 +227,5 @@ def build_response(
         recommended_cadr_m3_per_hour=cadr.required_cadr_m3_per_hour,
         recommendations=recommendations,
         gemini_used=bool(gemini_explanations),
-        filter_events=filter_events,
+        filter_events=0,
     )

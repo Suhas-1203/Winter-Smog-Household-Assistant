@@ -1,18 +1,11 @@
-"""Flask entrypoint for the winter-smog household assistant.
-
-The route handler does exactly three things:
-  1. Parses the user's form input into a FamilyProfile.
-  2. Calls recommender.build_response() to get all numbers and text.
-  3. Renders templates/index.html with the result.
-
-All numeric logic lives in src/. This file contains no arithmetic.
-"""
+"""Flask entrypoint for the winter-smog household assistant."""
 
 from __future__ import annotations
 
 import os
+from typing import Any
 
-from flask import Flask, render_template, request
+from flask import Flask, Response, render_template, request
 from dotenv import load_dotenv
 
 from src.config import SUPPORTED_LANGUAGES
@@ -22,9 +15,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# A small map of Indian cities to OpenAQ location ids, used by the form
-# dropdown. These ids are stable monitoring stations on OpenAQ.
-CITY_LOCATIONS = {
+CITY_LOCATIONS: dict[str, int] = {
     "Delhi": 2178,
     "Mumbai": 2245,
     "Bengaluru": 2247,
@@ -35,11 +26,11 @@ CITY_LOCATIONS = {
 
 
 @app.route("/", methods=["GET", "POST"])
-def index():
+def index() -> str:
     """Render the form and, on POST, the computed response."""
-    response = None
-    error = None
-    form_values = {
+    response: Any = None
+    error: str | None = None
+    form_values: dict[str, str] = {
         "city": "Delhi",
         "area_m2": "30",
         "ceiling_height_m": "2.7",
@@ -81,8 +72,3 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=os.environ.get("FLASK_ENV") == "development", port=5000)
-
-@app.errorhandler(500)
-def internal_error(error):
-    import traceback
-    return f"<pre>{traceback.format_exc()}</pre>", 500    
